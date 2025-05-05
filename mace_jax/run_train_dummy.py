@@ -80,6 +80,9 @@ batch_dict = dict(
     mask=mask,
 )
 
+for key, value in batch_dict.items():
+    print(key, value.shape)
+
 # Initialization
 model_weights = jax.jit(model.init)(jax.random.key(0), batch_dict)
 opt = optax.adam(1e-2)
@@ -135,3 +138,10 @@ t1 = time.perf_counter()
 
 runtime_per_step = 1e3 * (t1 - t0) / 10
 print(f"{runtime_per_step:.0f} ms per step")
+
+E, F, V = model.apply(model_weights, batch_dict)
+print(f"E pred: {E}")
+print(f"F pred: {F}")
+
+print(f"E true: {target_E}")
+print(f"F true: {target_F}")

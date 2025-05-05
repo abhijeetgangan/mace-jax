@@ -425,6 +425,13 @@ def main():
     runtime_per_step = 1e3 * (t1 - t0) / 10
     print(f"{runtime_per_step:.0f} ms per step")
 
+    E, F = model.apply(w, batch_dict)
+    print(f"E pred: {E}")
+    print(f"F pred: {F}")
+
+    print(f"E true: {target_E}")
+    print(f"F true: {target_F}")
+
 
 if __name__ == "__main__":
     main()
