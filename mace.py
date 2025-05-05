@@ -21,6 +21,8 @@ Install dependencies with
 $ pip install -U "jax[cuda12]"
 $ pip install -U flax optax
 $ pip install cuequivariance-jax==0.4.0 cuequivariance-ops-jax-cu12==0.4.0 --force-reinstall
+$ pip install packaging
+$ pip install nvidia-cuda-nvrtc-cu12
 """
 
 from typing import Callable
@@ -70,16 +72,14 @@ class MACELayer(flax.linen.Module):
         else:
             hidden_out = self.hidden_irreps
 
-        def lin(irreps: cue.Irreps, input: cuex.RepArray, name: str):
-            e = cue.descriptors.linear(input.irreps, irreps)
+        def lin(irreps: cue.Irreps, inp: cuex.RepArray, name: str):
+            e = cue.descriptors.linear(inp.irreps, irreps)
             w = self.param(name, jax.random.normal, (e.inputs[0].irreps.dim,), dtype)
-            return cuex.equivariant_polynomial(
-                e, [w, input], name=f"{self.name}_{name}"
-            )
+            return cuex.equivariant_polynomial(e, [w, inp], name=f"{self.name}_{name}")
 
-        def linZ(irreps: cue.Irreps, input: cuex.RepArray, name: str):
+        def linZ(irreps: cue.Irreps, inp: cuex.RepArray, name: str):
             # Dividing by num_species for consistency with the 1-hot implementation
-            e = cue.descriptors.linear(input.irreps, irreps)
+            e = cue.descriptors.linear(inp.irreps, irreps)
             e = e * (1.0 / self.num_species**0.5)
             w = self.param(
                 name,
@@ -89,7 +89,7 @@ class MACELayer(flax.linen.Module):
             )
             return cuex.equivariant_polynomial(
                 e,
-                [w, input],
+                [w, inp],
                 indices=[node_species, None, None],
                 name=f"{self.name}_{name}",
             )
@@ -415,7 +415,7 @@ def main():
 
     t0 = time.perf_counter()
 
-    for i in range(10):
+    for _ in range(10):
         (w, opt_state) = step(w, opt_state, batch_dict, target_E, target_F)
         step_count += 1
 
