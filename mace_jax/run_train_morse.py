@@ -16,7 +16,7 @@ from mace_jax.tools.plot_train import plot_training_results
 
 config.update("jax_enable_x64", True)
 
-dataset = read("../data/Cu_dataset.xyz", index=":")[1:2]
+dataset = read("../data/Cu_dataset.xyz", index=":")
 cutoff = 6.0
 energy_list = []
 stress_list = []
@@ -25,6 +25,9 @@ senders_list = []
 receivers_list = []
 cell_list = []
 edge_vectors_list = []
+edge_index_list = []
+nats_list = []
+batch_offset = 0
 for i, atoms in enumerate(dataset):
     edge_index, shifts, unit_shifts, cell = get_neighborhood(
         atoms.positions,
@@ -46,23 +49,25 @@ for i, atoms in enumerate(dataset):
         shifts=shifts,
         normalize=False,
     )
-
     energy_list.append(energy)
     stress_list.append(stress)
     forces_list.append(forces)
-    senders_list.append(edge_index[0])
-    receivers_list.append(edge_index[1])
     edge_vectors_list.append(edge_vectors)
+    edge_index_list.append(edge_index + batch_offset)
     cell_list.append(cell)
+    nats_list.append(len(atoms))
+    batch_offset += len(atoms)
 
 num_species = 1
 edge_vectors = jnp.concatenate(edge_vectors_list, axis=0)
+edge_index = jnp.concatenate(edge_index_list, axis=1)
+nats = jnp.array(nats_list)
 num_edges = len(edge_vectors)
-num_nodes = jnp.sum(jnp.array([len(atoms) for atoms in dataset]))
+num_nodes = jnp.sum(nats)
 num_graphs = len(dataset)
 
-senders = jnp.concatenate(senders_list)
-receivers = jnp.concatenate(receivers_list)
+senders = edge_index[0]
+receivers = edge_index[1]
 cell = jnp.stack(cell_list)
 
 forces = jnp.concatenate(forces_list)
@@ -70,9 +75,9 @@ energy = jnp.stack(energy_list)
 stress = jnp.stack(stress_list)
 
 graph_index = jnp.concatenate(
-    [jnp.ones(len(forces), dtype=jnp.int64) * i for i in range(num_species)]
+    [jnp.zeros(nats[i], dtype=jnp.int64) + i for i in range(num_graphs)]
 )
-nats = jnp.zeros((num_graphs,), dtype=jnp.int64).at[graph_index].add(1)
+
 mask = jnp.ones((num_edges,), dtype=bool)
 species = jnp.concatenate(
     [jnp.ones(len(forces), dtype=jnp.int64) * i for i in range(num_species)]
