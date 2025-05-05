@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 
-import matscipy.neighbours
 import numpy as np
+from matscipy.neighbours import neighbour_list
 
 
 def get_neighborhood(
@@ -9,29 +9,87 @@ def get_neighborhood(
     cutoff: float,
     pbc: Optional[Tuple[bool, bool, bool]] = None,
     cell: Optional[np.ndarray] = None,  # [3, 3]
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    true_self_interaction=False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute the neighborhood of atoms within a cutoff distance.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Atomic positions with shape [num_positions, 3].
+    cutoff : float
+        Cutoff radius for neighbor search.
+    pbc : tuple of bool, optional
+        Periodic boundary conditions in x, y, z directions.
+        If None, defaults to (False, False, False).
+    cell : np.ndarray, optional
+        Unit cell vectors with shape [3, 3].
+        If None, defaults to identity matrix.
+    true_self_interaction : bool, default=False
+        Whether to include self-interactions (edges from an atom to itself).
+
+    Returns
+    -------
+    edge_index : np.ndarray
+        Edge indices with shape [2, n_edges], where edge_index[0] are sender indices
+        and edge_index[1] are receiver indices.
+    shifts : np.ndarray
+        Shift vectors for each edge with shape [n_edges, 3].
+    unit_shifts : np.ndarray
+        Unit cell shifts for each edge with shape [n_edges, 3].
+    cell : np.ndarray
+        The (possibly modified) unit cell with shape [3, 3].
+    """
     if pbc is None:
         pbc = (False, False, False)
 
-    if cell is None or np.all(cell == 0.0):
+    if cell is None or cell.any() == np.zeros((3, 3)).any():
         cell = np.identity(3, dtype=float)
 
     assert len(pbc) == 3 and all(isinstance(i, (bool, np.bool_)) for i in pbc)
     assert cell.shape == (3, 3)
 
-    # Note (mario): I swapped senders and receivers here
-    # j = senders, i = receivers instead of the other way around
-    # such that the receivers are always in the central cell.
-    # This is important to propagate message passing towards the center which can be useful in some cases.
-    receivers, senders, senders_unit_shifts = matscipy.neighbours.neighbour_list(
+    pbc_x = pbc[0]
+    pbc_y = pbc[1]
+    pbc_z = pbc[2]
+    identity = np.identity(3, dtype=float)
+    max_positions = np.max(np.absolute(positions)) + 1
+    # Extend cell in non-periodic directions
+    # For models with more than 5 layers, the multiplicative constant needs to be increased.
+    # temp_cell = np.copy(cell)
+    if not pbc_x:
+        cell[0, :] = max_positions * 5 * cutoff * identity[0, :]
+    if not pbc_y:
+        cell[1, :] = max_positions * 5 * cutoff * identity[1, :]
+    if not pbc_z:
+        cell[2, :] = max_positions * 5 * cutoff * identity[2, :]
+
+    sender, receiver, unit_shifts = neighbour_list(
         quantities="ijS",
         pbc=pbc,
         cell=cell,
         positions=positions,
         cutoff=cutoff,
+        # self_interaction=True,  # we want edges from atom to itself in different periodic images
+        # use_scaled_positions=False,  # positions are not scaled positions
     )
+
+    if not true_self_interaction:
+        # Eliminate self-edges that don't cross periodic boundaries
+        true_self_edge = sender == receiver
+        true_self_edge &= np.all(unit_shifts == 0, axis=1)
+        keep_edge = ~true_self_edge
+
+        # Note: after eliminating self-edges, it can be that no edges remain in this system
+        sender = sender[keep_edge]
+        receiver = receiver[keep_edge]
+        unit_shifts = unit_shifts[keep_edge]
+
+    # Build output
+    edge_index = np.stack((sender, receiver))  # [2, n_edges]
 
     # From the docs: With the shift vector S, the distances D between atoms can be computed from
     # D = positions[j]-positions[i]+S.dot(cell)
-    # Note (mario): this is done in the function get_edge_relative_vectors
-    return senders, receivers, senders_unit_shifts
+    shifts = np.dot(unit_shifts, cell)  # [n_edges, 3]
+
+    return edge_index, shifts, unit_shifts, cell

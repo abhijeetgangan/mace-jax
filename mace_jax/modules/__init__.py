@@ -1,7 +1,7 @@
 from .blocks import radial_basis
-from .models import MACE
+from .models import MACEModel
 
 __all__ = [
     "radial_basis",
-    "MACE",
+    "MACEModel",
 ]

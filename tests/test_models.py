@@ -1,98 +1,84 @@
-from collections import namedtuple
-
-import e3nn_jax as e3nn
-import haiku as hk
 import jax
 import jax.numpy as jnp
-import jraph
 import numpy as np
-from e3nn_jax.util import assert_equivariant
+import cuequivariance as cue
 
-from mace_jax import modules
-from mace_jax.modules import MACE, SymmetricContraction
+from mace_jax.modules.models import MACEModel
 
+# Dataset specifications
+num_species = 5
+num_graphs = 10
+avg_num_neighbors = 20
 
-def test_symmetric_contraction():
-    x = e3nn.normal("0e + 0o + 1o + 1e + 2e + 2o", jax.random.PRNGKey(0), (32, 128))
-    y = jax.random.normal(jax.random.PRNGKey(1), (32, 4))
+model_size = "MP-S"
 
-    model = hk.without_apply_rng(
-        hk.transform(lambda x, y: SymmetricContraction(3, ["0e", "1o", "2e"])(x, y))
-    )
-    w = model.init(jax.random.PRNGKey(2), x, y)
+num_atoms = 3_000
+num_edges = 160_000
 
-    assert_equivariant(
-        lambda x: model.apply(w, x, y), jax.random.PRNGKey(3), args_in=(x,)
-    )
+model = MACEModel(
+    num_layers=2,
+    num_features={
+        "MP-S": 128,
+        "MP-M": 128,
+        "MP-L": 128,
+        "OFF-S": 64 + 32,
+        "OFF-M": 128,
+        "OFF-L": 128 + 64,
+    }[model_size],
+    num_species=num_species,
+    max_ell=3,
+    correlation=3,
+    num_radial_basis=8,
+    interaction_irreps=cue.Irreps(cue.O3, "0e+1o+2e+3o"),
+    hidden_irreps=cue.Irreps(
+        cue.O3,
+        {
+            "MP-S": "0e",
+            "MP-M": "0e+1o",
+            "MP-L": "0e+1o+2e",
+            "OFF-S": "0e",
+            "OFF-M": "0e+1o",
+            "OFF-L": "0e+1o+2e",
+        }[model_size],
+    ),
+    offsets=np.zeros(num_species),
+    cutoff=5.0,
+    epsilon=1 / avg_num_neighbors,
+    skip_connection_first_layer=("MP" in model_size),
+    replicate_original_group=False,
+)
 
+# Dummy data
+vecs = jax.random.normal(jax.random.key(0), (num_edges, 3))
+species = jax.random.randint(jax.random.key(0), (num_atoms,), 0, num_species)
+senders, receivers = jax.random.randint(
+    jax.random.key(0), (2, num_edges), 0, num_atoms
+)
+graph_index = jax.random.randint(jax.random.key(0), (num_atoms,), 0, num_graphs)
+graph_index = jnp.sort(graph_index)
 
-# TODO fix this test
-def test_mace():
-    atomic_energies = np.array([1.0, 3.0], dtype=float)
+target_E = jax.random.normal(jax.random.key(0), (num_graphs,))
+target_F = jax.random.normal(jax.random.key(0), (num_atoms, 3))
+target_V = jax.random.normal(jax.random.key(0), (num_graphs, 3, 3))
 
-    @hk.without_apply_rng
-    @hk.transform
-    def model(graph):
-        return MACE(
-            r_max=5,
-            num_bessel=8,
-            num_deriv_in_zero=5,
-            num_deriv_in_one=2,
-            max_ell=2,
-            interaction_cls=modules.interaction_classes[
-                "AgnosticResidualInteractionBlock"
-            ],
-            interaction_cls_first=modules.interaction_classes[
-                "AgnosticResidualInteractionBlock"
-            ],
-            num_interactions=5,
-            hidden_irreps=e3nn.Irreps("32x0e"),
-            readout_mlp_irreps=e3nn.Irreps("16x0e"),
-            gate=jax.nn.silu,
-            atomic_energies=atomic_energies,
-            avg_num_neighbors=8,
-            correlation=3,
-        )(graph)
+nats = jnp.zeros((num_graphs,), dtype=jnp.int32).at[graph_index].add(1)
+mask = jnp.ones((num_edges,), dtype=bool)
 
-    Node = namedtuple("Node", ["positions", "attrs"])
-    Edge = namedtuple("Edge", ["shifts"])
-    Globals = namedtuple("Globals", ["cell"])
+batch_dict = dict(
+    nn_vecs=vecs,
+    species=species,
+    inda=senders,
+    indb=receivers,
+    inde=graph_index,
+    nats=nats,
+    mask=mask,
+)
 
-    graph = jraph.GraphsTuple(
-        nodes=Node(
-            positions=jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),
-            attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
-        ),
-        edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
-        globals=Globals(cell=None),
-        senders=jnp.array([0, 1]),
-        receivers=jnp.array([1, 0]),
-        n_edge=jnp.array([2]),
-        n_node=jnp.array([2]),
-    )
+# Initialization
+w = jax.jit(model.init)(jax.random.key(0), batch_dict)
 
-    w = model.init(jax.random.PRNGKey(0), graph)
+E, F, V = model.apply(w, batch_dict)
 
-    def wrapper(positions):
-        graph = jraph.GraphsTuple(
-            nodes=Node(
-                positions=positions.array,
-                attrs=jax.nn.one_hot(jnp.array([0, 1]), 2),
-            ),
-            edges=Edge(shifts=jnp.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])),
-            globals=Globals(cell=None),
-            senders=jnp.array([0, 1]),
-            receivers=jnp.array([1, 0]),
-            n_edge=jnp.array([2]),
-            n_node=jnp.array([2]),
-        )
-        energy = model.apply(w, graph)["energy"]
-        return e3nn.IrrepsArray("0e", energy)
-
-    positions = e3nn.normal("1o", jax.random.PRNGKey(1), (2,))
-    assert_equivariant(wrapper, jax.random.PRNGKey(1), args_in=(positions,))
-
-
-if __name__ == "__main__":
-    test_mace()
-    # test_symmetric_contraction()
+assert E.shape == (num_graphs,)
+assert F.shape == (num_atoms, 3)
+assert V.shape == (num_graphs, 3, 3)
