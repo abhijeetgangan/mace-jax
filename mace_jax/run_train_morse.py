@@ -136,6 +136,9 @@ model = MACEModel(
     epsilon=float(1.0 / avg_num_neighbors),
     skip_connection_first_layer=("MP" in model_size),
     replicate_original_group=False,
+    atomic_numbers=jnp.array([29]),
+    pair_repulsion=True,
+    zbl_trainable=True,
 )
 
 # Initialization

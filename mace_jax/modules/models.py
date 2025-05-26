@@ -12,6 +12,7 @@ from cuequivariance.group_theory.experimental.mace import symmetric_contraction
 from cuequivariance_jax.experimental.utils import MultiLayerPerceptron
 
 from mace_jax.modules.blocks import radial_basis
+from mace_jax.modules.radial import ZBLBasis
 
 
 class MACELayer(flax.linen.Module):
@@ -335,6 +336,16 @@ class MACEModel(flax.linen.Module):
     skip_connection_first_layer: bool
     replicate_original_group: bool
 
+    # ZBL parameters
+    atomic_numbers: np.ndarray
+    pair_repulsion: bool = False
+    zbl_trainable: bool = False
+
+    def setup(self):
+        """Initialize ZBL module if needed."""
+        if self.pair_repulsion:
+            self.zbl_basis = ZBLBasis(p=6, trainable=self.zbl_trainable)
+
     @flax.linen.compact
     def __call__(
         self, batch: dict[str, jax.Array | int]
@@ -392,13 +403,15 @@ class MACEModel(flax.linen.Module):
                     (self.num_species, self.num_features),
                     vecs.dtype,
                 )
+                lengths = jnp.linalg.norm(vecs, axis=1)
+
                 node_feats = cuex.as_irreps_array(
                     w[species] / jnp.sqrt(self.num_species)
                 )
 
                 radial_embeddings = jax.vmap(
                     radial_basis(self.cutoff, self.num_radial_basis)
-                )(jnp.linalg.norm(vecs, axis=1))
+                )(lengths)
                 vecs = cuex.RepArray("1o", vecs)
 
                 Es = 0
@@ -422,6 +435,18 @@ class MACEModel(flax.linen.Module):
                         name=f"layer_{i}",
                     )(vecs, node_feats, species, radial_embeddings, senders, receivers)
                     Es += jnp.squeeze(output.array, 1)
+
+                # Add ZBL repulsion if enabled
+                if self.pair_repulsion:
+                    zbl_energies = self.zbl_basis(
+                        distances=lengths,
+                        species=species,
+                        senders=senders,
+                        receivers=receivers,
+                        atomic_numbers=jnp.asarray(self.atomic_numbers),
+                    )
+                    Es += zbl_energies
+
                 return jnp.sum(Es), Es
 
         edge_forces, Ei = jax.grad(model, has_aux=True)(vecs)
