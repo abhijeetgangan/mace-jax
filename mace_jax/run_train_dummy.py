@@ -36,7 +36,7 @@ model = MACEModel(
     num_species=num_species,
     max_ell=3,
     correlation=3,
-    num_radial_basis=8,
+    num_bessel=8,
     interaction_irreps=cue.Irreps(cue.O3, "0e+1o+2e+3o"),
     hidden_irreps=cue.Irreps(
         cue.O3,
@@ -54,6 +54,8 @@ model = MACEModel(
     epsilon=1 / avg_num_neighbors,
     skip_connection_first_layer=("MP" in model_size),
     replicate_original_group=False,
+    pair_repulsion=True,
+    distance_transform="Agnesi",
 )
 
 # Dummy data

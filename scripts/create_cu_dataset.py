@@ -6,7 +6,7 @@ from ase.md.langevin import Langevin
 
 atoms = bulk("Cu", "fcc", a=3.615, cubic=False).repeat((3, 3, 3))
 
-# Set up the calculator with EAM potential
+# Set up the calculator with Morse potential
 calc = MorsePotential(epsilon=0.3429, r0=2.866, rho=1.3588, r_cut=6.0)
 atoms.calc = calc
 

@@ -1,3 +1,4 @@
+import argparse
 import time
 
 import cuequivariance as cue
@@ -5,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from ase import Atoms
 from ase.io import read
 from jax import config
 
@@ -15,6 +17,14 @@ from mace_jax.modules.models import MACEModel
 from mace_jax.tools.plot_train import plot_training_results
 
 config.update("jax_enable_x64", True)
+
+argparser = argparse.ArgumentParser()
+argparser.add_argument("--pair_repulsion", type=int)
+argparser.add_argument("--distance_transform", type=int)
+args = argparser.parse_args()
+
+pair_repulsion = bool(args.pair_repulsion)
+distance_transform = bool(args.distance_transform)
 
 dataset = read("../data/Cu_dataset.xyz", index=":")
 cutoff = 6.0
@@ -118,7 +128,7 @@ model = MACEModel(
     num_species=num_species,
     max_ell=3,
     correlation=3,
-    num_radial_basis=8,
+    num_bessel=8,
     interaction_irreps=cue.Irreps(cue.O3, "0e+1o+2e+3o"),
     hidden_irreps=cue.Irreps(
         cue.O3,
@@ -137,16 +147,17 @@ model = MACEModel(
     skip_connection_first_layer=("MP" in model_size),
     replicate_original_group=False,
     num_polynomial_cutoff=6,
-    atomic_numbers=jnp.array([29]),
-    pair_repulsion=True,
+    atomic_numbers=jnp.array([29]) * jnp.ones((num_nodes,)),  # [num_nodes]
+    pair_repulsion=pair_repulsion,
+    distance_transform="Agnesi" if distance_transform else "None",
 )
 
 # Initialization
 model_weights = jax.jit(model.init)(jax.random.key(0), batch_dict)
-opt = optax.adam(5e-3)
+opt = optax.adam(7.5e-3)
 model_opt_state = opt.init(model_weights)
 step_count = 0
-num_steps = 400
+num_steps = 1000
 
 
 # Training
@@ -235,3 +246,61 @@ print(f"S pred: {V / jnp.linalg.det(batch_dict['cell']).reshape(-1, 1, 1)}")
 print(f"E true: {target_E}")
 print(f"F true: {target_F}")
 print(f"S true: {target_S}")
+
+# Create Cu dimer batch for plotting energy vs distance
+# Define distance range for Cu dimer
+distances = jnp.linspace(0.5, 7.5, 100)
+energies = []
+
+print("\nComputing Cu dimer energy curve...")
+
+for dist in distances:
+    # Create Cu dimer at specified distance
+    dimer = Atoms("Cu2", positions=[[0, 0, 0], [dist, 0, 0]])
+
+    # Get neighborhood for this dimer
+    edge_index, shifts, unit_shifts, cell = get_neighborhood(
+        dimer.positions,
+        cutoff=cutoff,
+        pbc=dimer.pbc,
+        cell=dimer.cell.array,
+    )
+
+    # Get edge vectors and distances
+    positions = jnp.array(dimer.get_positions())
+    edge_index = jnp.array(edge_index, dtype=jnp.int64)
+
+    edge_vectors, edge_distances = get_edge_vectors_and_lengths(
+        positions,
+        senders=edge_index[0],
+        receivers=edge_index[1],
+        shifts=shifts,
+        normalize=False,
+    )
+
+    # Create species array (Cu is typically index 0 in our dataset)
+    species = jnp.array([0, 0])  # Both atoms are Cu
+
+    # Create batch dictionary for dimer
+    dimer_batch = {
+        "nn_vecs": edge_vectors,
+        "species": species,
+        "inda": edge_index[0],
+        "indb": edge_index[1],
+        "inde": jnp.array([0, 0]),  # Both atoms in same graph
+        "nats": jnp.array([2]),  # One graph with 2 atoms
+        "mask": jnp.ones(len(edge_index[0]), dtype=bool),
+        "cell": jnp.array([cell]),
+    }
+
+    # Compute energy for this configuration
+    E_dimer, _, _ = model.apply(model_weights, dimer_batch)
+    energies.append(float(E_dimer[0]))
+
+# Convert to numpy for plotting
+distances_np = np.array(distances)
+energies_np = np.array(energies)
+
+# Save the distances and energies for later plotting
+np.save(f"distances_{pair_repulsion}_{distance_transform}.npy", distances_np)
+np.save(f"energies_{pair_repulsion}_{distance_transform}.npy", energies_np)

@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Callable
 
 import cuequivariance as cue
@@ -11,12 +12,7 @@ from cuequivariance.group_theory.experimental.e3nn import O3_e3nn
 from cuequivariance.group_theory.experimental.mace import symmetric_contraction
 from cuequivariance_jax.experimental.utils import MultiLayerPerceptron
 
-from mace_jax.modules.radial import (
-    AgnesiTransform,
-    PolynomialCutoff,
-    ZBLBasis,
-    radial_basis,
-)
+from mace_jax.modules.radial import RadialBasis, ZBLBasis
 
 
 class MACELayer(flax.linen.Module):
@@ -316,8 +312,8 @@ class MACEModel(flax.linen.Module):
         Maximum angular momentum.
     correlation : int
         Order of correlation.
-    num_radial_basis : int
-        Number of radial basis functions.
+    num_bessel : int
+        Number of Bessel basis functions.
     epsilon : float
         Small constant for numerical stability.
     skip_connection_first_layer : bool
@@ -341,7 +337,7 @@ class MACEModel(flax.linen.Module):
     hidden_irreps: cue.Irreps
     max_ell: int
     correlation: int
-    num_radial_basis: int
+    num_bessel: int
     epsilon: float
     skip_connection_first_layer: bool
     replicate_original_group: bool
@@ -350,6 +346,9 @@ class MACEModel(flax.linen.Module):
     atomic_numbers: jax.Array
     pair_repulsion: bool = False
     num_polynomial_cutoff: int = 6
+
+    # Distance transform
+    distance_transform: str = "None"
 
     def setup(self):
         """Setup the model."""
@@ -414,19 +413,23 @@ class MACEModel(flax.linen.Module):
                     (self.num_species, self.num_features),
                     vecs.dtype,
                 )
-                lengths = jnp.linalg.norm(vecs, axis=1)
+                lengths = jnp.linalg.norm(vecs, axis=1, keepdims=True)  # [num_edges, 1]
 
                 node_feats = cuex.as_irreps_array(
                     w[species] / jnp.sqrt(self.num_species)
                 )
-
-                radial_embeddings = jax.vmap(
-                    radial_basis(
-                        r_max=self.cutoff,
-                        num_radial_basis=self.num_radial_basis,
-                        num_polynomial_cutoff=self.num_polynomial_cutoff,
-                    ),
-                )(lengths)
+                radial_embeddings = RadialBasis(
+                    r_max=self.cutoff,
+                    num_bessel=self.num_bessel,
+                    num_polynomial_cutoff=self.num_polynomial_cutoff,
+                    distance_transform=self.distance_transform,
+                )(
+                    lengths,
+                    species,
+                    senders,
+                    receivers,
+                    jnp.asarray(self.atomic_numbers),
+                )  # [num_edges, num_bessel]
                 vecs = cuex.RepArray("1o", vecs)
 
                 Es = 0
@@ -454,7 +457,7 @@ class MACEModel(flax.linen.Module):
                 # Add ZBL repulsion if enabled
                 if self.pair_repulsion:
                     zbl_energies = self.zbl_basis(
-                        distances=lengths,
+                        x=lengths,
                         species=species,
                         senders=senders,
                         receivers=receivers,

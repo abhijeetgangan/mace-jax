@@ -1,8 +1,8 @@
 from .models import MACEModel
-from .radial import AgnesiTransform, PolynomialCutoff, ZBLBasis, radial_basis
+from .radial import AgnesiTransform, PolynomialCutoff, RadialBasis, ZBLBasis
 
 __all__ = [
-    "radial_basis",
+    "RadialBasis",
     "ZBLBasis",
     "PolynomialCutoff",
     "AgnesiTransform",

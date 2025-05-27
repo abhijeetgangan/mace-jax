@@ -91,70 +91,6 @@ class PolynomialCutoff(flax.linen.Module):
         return envelope * (x < r_max)
 
 
-class radial_basis(flax.linen.Module):
-    """Radial basis functions using Bessel functions with polynomial envelope.
-
-    Parameters
-    ----------
-    r_max : float
-        Cutoff radius for the radial basis functions.
-    num_radial_basis : int
-        Number of radial basis functions to use.
-    num_polynomial_cutoff : int, default=6
-        Number of polynomial cutoff to use.
-    """
-
-    r_max: float
-    num_radial_basis: int
-    num_polynomial_cutoff: int = 6
-
-    def setup(self):
-        self.cutoff_fn = PolynomialCutoff(
-            r_max=self.r_max, p=self.num_polynomial_cutoff
-        )
-
-    def bessel(self, x: jax.Array) -> jax.Array:
-        """Bessel basis functions.
-
-        Parameters
-        ----------
-        x : jax.Array
-            Input distances.
-
-        Returns
-        -------
-        jax.Array
-            Bessel function values.
-        """
-        n = jnp.arange(1, self.num_radial_basis + 1, dtype=x.dtype)
-        return (
-            jnp.sqrt(2.0 / self.r_max)
-            * jnp.pi
-            * n
-            / self.r_max
-            * jnp.sinc(n * x / self.r_max)
-        )
-
-    @flax.linen.compact
-    def __call__(self, edge_lengths: jax.Array) -> jax.Array:
-        """Compute radial basis functions with cutoff.
-
-        Parameters
-        ----------
-        edge_lengths : jax.Array
-            Edge distances, shape [num_edges]
-
-        Returns
-        -------
-        jax.Array
-            Radial basis function values.
-        """
-        assert edge_lengths.ndim == 0
-        cutoff = self.cutoff_fn(edge_lengths)
-        radial = self.bessel(edge_lengths)
-        return radial * cutoff
-
-
 class ZBLBasis(flax.linen.Module):
     """Implementation of the Ziegler-Biersack-Littmark (ZBL) potential
     with a polynomial cutoff envelope.
@@ -185,7 +121,7 @@ class ZBLBasis(flax.linen.Module):
 
     def __call__(
         self,
-        distances: jax.Array,
+        x: jax.Array,
         species: jax.Array,
         senders: jax.Array,
         receivers: jax.Array,
@@ -195,8 +131,8 @@ class ZBLBasis(flax.linen.Module):
 
         Parameters
         ----------
-        distances : jax.Array
-            Edge distances, shape [num_edges]
+        x : jax.Array
+            Edge distances, shape [num_edges, 1]
         species : jax.Array
             Node species indices, shape [num_nodes]
         senders : jax.Array
@@ -213,8 +149,8 @@ class ZBLBasis(flax.linen.Module):
         """
         # Get atomic numbers for sender and receiver nodes
         node_atomic_numbers = atomic_numbers[species]
-        Z_u = node_atomic_numbers[senders]
-        Z_v = node_atomic_numbers[receivers]
+        Z_u = node_atomic_numbers[senders].reshape(-1, 1)  # [num_edges, 1]
+        Z_v = node_atomic_numbers[receivers].reshape(-1, 1)  # [num_edges, 1]
 
         # Calculate screening parameter
         a = (
@@ -223,7 +159,7 @@ class ZBLBasis(flax.linen.Module):
             / (jnp.power(Z_u, self.a_exp) + jnp.power(Z_v, self.a_exp))
         )
 
-        r_over_a = distances / a
+        r_over_a = x / a
 
         # ZBL potential function
         phi = (
@@ -234,22 +170,28 @@ class ZBLBasis(flax.linen.Module):
         )
 
         # Calculate ZBL energy for each edge
-        v_edges = (14.3996 * Z_u * Z_v) / distances * phi
+        v_edges = (14.3996 * Z_u * Z_v) / x * phi
 
         # Apply polynomial cutoff based on covalent radii
         r_max = COVALENT_RADII[Z_u.astype(int)] + COVALENT_RADII[Z_v.astype(int)]
-        envelope = PolynomialCutoff.calculate_envelope(distances, r_max, self.p)
+
+        envelope = PolynomialCutoff.calculate_envelope(x, r_max, self.p)
         v_edges = 0.5 * v_edges * envelope
 
         # Sum contributions to each node
         num_nodes = species.shape[0]
-        V_ZBL = jnp.zeros((num_nodes,), dtype=v_edges.dtype).at[receivers].add(v_edges)
+        V_ZBL = (
+            jnp.zeros((num_nodes, 1), dtype=v_edges.dtype).at[receivers].add(v_edges)
+        )
 
-        return V_ZBL
+        return V_ZBL.flatten()
 
 
 class AgnesiTransform(flax.linen.Module):
     """Agnesi transform for radial distances.
+
+    Agnesi transform - see section on Radial transformations in
+    ACEpotentials.jl, JCP 2023 (https://doi.org/10.1063/5.0158783).
 
     Parameters
     ----------
@@ -287,16 +229,134 @@ class AgnesiTransform(flax.linen.Module):
         receivers: jax.Array,
         atomic_numbers: jax.Array,
     ) -> jax.Array:
-        """Apply Agnesi transform."""
+        """Apply Agnesi transform.
+
+        Parameters
+        ----------
+        x : jax.Array
+            Edge distances, shape [num_edges]
+        species : jax.Array
+            Node species indices, shape [num_nodes]
+        senders : jax.Array
+            Sender node indices, shape [num_edges]
+        receivers : jax.Array
+            Receiver node indices, shape [num_edges]
+        atomic_numbers : jax.Array
+            Atomic numbers for each species, shape [num_species]
+
+        Returns
+        -------
+        jax.Array
+            Transformed distances, shape [num_edges]
+        """
         # Get atomic numbers for sender and receiver nodes
         node_atomic_numbers = atomic_numbers[species]
-        Z_u = node_atomic_numbers[senders]
-        Z_v = node_atomic_numbers[receivers]
+        Z_u = node_atomic_numbers[senders].reshape(-1, 1)  # [num_edges, 1]
+        Z_v = node_atomic_numbers[receivers].reshape(-1, 1)  # [num_edges, 1]
 
-        r_0 = 0.5 * (COVALENT_RADII[Z_u.astype(int)] + COVALENT_RADII[Z_v.astype(int)])
+        # Calculate r_0 based on covalent radii
+        r_0 = 0.5 * (
+            COVALENT_RADII[Z_u.astype(int)] + COVALENT_RADII[Z_v.astype(int)]
+        )  # [num_edges, 1]
         r_over_r_0 = x / r_0
 
-        numerator = self.a_param * jnp.power(r_over_r_0, self.q_param)
-        denominator = 1 + jnp.power(r_over_r_0, self.q_param - self.p_param)
+        # Apply Agnesi transform: 1 / (1 + a * r^q / (1 + r^(q-p)))
+        inner_term = (
+            self.a_param
+            * jnp.power(r_over_r_0, self.q_param)
+            / (1 + jnp.power(r_over_r_0, self.q_param - self.p_param))
+        )
 
-        return 1.0 / (1 + numerator / denominator)
+        return 1.0 / (1 + inner_term)
+
+
+class RadialBasis(flax.linen.Module):
+    """Radial basis functions using Bessel functions with polynomial envelope.
+
+    Parameters
+    ----------
+    r_max : float
+        Cutoff radius for the radial basis functions.
+    num_bessel : int
+        Number of Bessel basis functions to use.
+    num_polynomial_cutoff : int
+        Number of polynomial cutoff to use.
+    distance_transform : str, default="none"
+        Type of distance transform to use.
+    """
+
+    r_max: float
+    num_bessel: int
+    num_polynomial_cutoff: int
+
+    # TODO: Add other radial types
+    # radial_type: str = "bessel"
+
+    distance_transform: str = "none"
+
+    def setup(self):
+        self.cutoff_fn = PolynomialCutoff(
+            r_max=self.r_max, p=self.num_polynomial_cutoff
+        )
+        if self.distance_transform == "Agnesi":
+            self.distance_transform_fn = AgnesiTransform()
+
+    def bessel(self, x: jax.Array) -> jax.Array:
+        """Bessel basis functions.
+
+        Parameters
+        ----------
+        x : jax.Array
+            Input distances.
+
+        Returns
+        -------
+        jax.Array
+            Bessel function values.
+        """
+        n = jnp.arange(1, self.num_bessel + 1, dtype=x.dtype)
+        return (
+            jnp.sqrt(2.0 / self.r_max)
+            * jnp.pi
+            * n
+            / self.r_max
+            * jnp.sinc(n * x / self.r_max)
+        )
+
+    @flax.linen.compact
+    def __call__(
+        self,
+        edge_lengths: jax.Array,
+        species: jax.Array,
+        senders: jax.Array,
+        receivers: jax.Array,
+        atomic_numbers: jax.Array,
+    ) -> jax.Array:
+        """Compute radial basis functions with cutoff.
+
+        Parameters
+        ----------
+        edge_lengths : jax.Array
+            Edge distances, shape [num_edges, 1]
+        species : jax.Array
+            Species indices, shape [num_nodes]
+        senders : jax.Array
+            Sender node indices, shape [num_edges]
+        receivers : jax.Array
+            Receiver node indices, shape [num_edges]
+        atomic_numbers : jax.Array
+            Atomic numbers, shape [num_nodes]
+
+        Returns
+        -------
+        jax.Array
+            Radial basis function values.
+        """
+        assert edge_lengths.ndim == 2
+        cutoff = self.cutoff_fn(edge_lengths)  # shape [num_edges, 1]
+        if self.distance_transform != "None":
+            edge_lengths = self.distance_transform_fn(
+                edge_lengths, species, senders, receivers, atomic_numbers
+            )
+        radial = self.bessel(edge_lengths)  # shape [num_edges, num_bessel]
+        return radial * cutoff  # shape [num_edges, num_bessel]

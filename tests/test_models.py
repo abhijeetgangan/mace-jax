@@ -28,7 +28,7 @@ model = MACEModel(
     num_species=num_species,
     max_ell=3,
     correlation=3,
-    num_radial_basis=8,
+    num_bessel=8,
     interaction_irreps=cue.Irreps(cue.O3, "0e+1o+2e+3o"),
     hidden_irreps=cue.Irreps(
         cue.O3,
