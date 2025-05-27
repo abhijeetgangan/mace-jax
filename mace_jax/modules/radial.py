@@ -54,6 +54,33 @@ class PolynomialCutoff(flax.linen.Module):
         jax.Array
             Envelope values
         """
+
+        # Same as below
+        '''
+        def envelope(self, x: jax.Array) -> jax.Array:
+            """Polynomial envelope function that smoothly goes to zero at r_max.
+
+            Parameters
+            ----------
+            x : jax.Array
+                Input distances.
+
+            Returns
+            -------
+            jax.Array
+                Envelope function values.
+            """
+            p = float(self.num_polynomial_cutoff)
+            xs = x / self.r_max
+            xp = jnp.power(xs, self.num_polynomial_cutoff)
+            return (
+                1.0
+                - 0.5 * (p + 1.0) * (p + 2.0) * xp
+                + p * (p + 2.0) * xp * xs
+                - 0.5 * p * (p + 1.0) * xp * xs * xs
+            )
+        '''
+
         r_over_r_max = x / r_max
         envelope = (
             1.0
@@ -62,6 +89,70 @@ class PolynomialCutoff(flax.linen.Module):
             - (p * (p + 1.0) / 2) * jnp.power(r_over_r_max, p + 2)
         )
         return envelope * (x < r_max)
+
+
+class radial_basis(flax.linen.Module):
+    """Radial basis functions using Bessel functions with polynomial envelope.
+
+    Parameters
+    ----------
+    r_max : float
+        Cutoff radius for the radial basis functions.
+    num_radial_basis : int
+        Number of radial basis functions to use.
+    num_polynomial_cutoff : int, default=6
+        Number of polynomial cutoff to use.
+    """
+
+    r_max: float
+    num_radial_basis: int
+    num_polynomial_cutoff: int = 6
+
+    def setup(self):
+        self.cutoff_fn = PolynomialCutoff(
+            r_max=self.r_max, p=self.num_polynomial_cutoff
+        )
+
+    def bessel(self, x: jax.Array) -> jax.Array:
+        """Bessel basis functions.
+
+        Parameters
+        ----------
+        x : jax.Array
+            Input distances.
+
+        Returns
+        -------
+        jax.Array
+            Bessel function values.
+        """
+        n = jnp.arange(1, self.num_radial_basis + 1, dtype=x.dtype)
+        return (
+            jnp.sqrt(2.0 / self.r_max)
+            * jnp.pi
+            * n
+            / self.r_max
+            * jnp.sinc(n * x / self.r_max)
+        )
+
+    @flax.linen.compact
+    def __call__(self, edge_lengths: jax.Array) -> jax.Array:
+        """Compute radial basis functions with cutoff.
+
+        Parameters
+        ----------
+        edge_lengths : jax.Array
+            Edge distances, shape [num_edges]
+
+        Returns
+        -------
+        jax.Array
+            Radial basis function values.
+        """
+        assert edge_lengths.ndim == 0
+        cutoff = self.cutoff_fn(edge_lengths)
+        radial = self.bessel(edge_lengths)
+        return radial * cutoff
 
 
 class ZBLBasis(flax.linen.Module):
@@ -155,3 +246,57 @@ class ZBLBasis(flax.linen.Module):
         V_ZBL = jnp.zeros((num_nodes,), dtype=v_edges.dtype).at[receivers].add(v_edges)
 
         return V_ZBL
+
+
+class AgnesiTransform(flax.linen.Module):
+    """Agnesi transform for radial distances.
+
+    Parameters
+    ----------
+    q : float, default=0.9183
+        Agnesi parameter q
+    p : float, default=4.5791
+        Agnesi parameter p
+    a : float, default=1.0805
+        Agnesi parameter a
+    trainable : bool, default=False
+        Whether parameters are trainable
+    """
+
+    q: float = 0.9183
+    p: float = 4.5791
+    a: float = 1.0805
+    trainable: bool = False
+
+    def setup(self):
+        """Initialize Agnesi transform parameters."""
+        if self.trainable:
+            self.q_param = self.param("q", lambda key: jnp.array(self.q))
+            self.p_param = self.param("p", lambda key: jnp.array(self.p))
+            self.a_param = self.param("a", lambda key: jnp.array(self.a))
+        else:
+            self.q_param = self.q
+            self.p_param = self.p
+            self.a_param = self.a
+
+    def __call__(
+        self,
+        x: jax.Array,
+        species: jax.Array,
+        senders: jax.Array,
+        receivers: jax.Array,
+        atomic_numbers: jax.Array,
+    ) -> jax.Array:
+        """Apply Agnesi transform."""
+        # Get atomic numbers for sender and receiver nodes
+        node_atomic_numbers = atomic_numbers[species]
+        Z_u = node_atomic_numbers[senders]
+        Z_v = node_atomic_numbers[receivers]
+
+        r_0 = 0.5 * (COVALENT_RADII[Z_u.astype(int)] + COVALENT_RADII[Z_v.astype(int)])
+        r_over_r_0 = x / r_0
+
+        numerator = self.a_param * jnp.power(r_over_r_0, self.q_param)
+        denominator = 1 + jnp.power(r_over_r_0, self.q_param - self.p_param)
+
+        return 1.0 / (1 + numerator / denominator)

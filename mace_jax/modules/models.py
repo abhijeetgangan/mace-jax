@@ -11,8 +11,12 @@ from cuequivariance.group_theory.experimental.e3nn import O3_e3nn
 from cuequivariance.group_theory.experimental.mace import symmetric_contraction
 from cuequivariance_jax.experimental.utils import MultiLayerPerceptron
 
-from mace_jax.modules.blocks import radial_basis
-from mace_jax.modules.radial import ZBLBasis
+from mace_jax.modules.radial import (
+    AgnesiTransform,
+    PolynomialCutoff,
+    ZBLBasis,
+    radial_basis,
+)
 
 
 class MACELayer(flax.linen.Module):
@@ -320,6 +324,12 @@ class MACEModel(flax.linen.Module):
         Whether to use skip connections in the first layer.
     replicate_original_group : bool
         Whether to replicate the original MACE group behavior.
+    atomic_numbers : jax.Array
+        Atomic numbers for each species.
+    pair_repulsion : bool
+        Whether to use pair repulsion.
+    num_polynomial_cutoff : int
+        Number of polynomial cutoff to use.
     """
 
     offsets: np.ndarray
@@ -337,14 +347,15 @@ class MACEModel(flax.linen.Module):
     replicate_original_group: bool
 
     # ZBL parameters
-    atomic_numbers: np.ndarray
+    atomic_numbers: jax.Array
     pair_repulsion: bool = False
-    zbl_trainable: bool = False
+    num_polynomial_cutoff: int = 6
 
     def setup(self):
-        """Initialize ZBL module if needed."""
+        """Setup the model."""
+        # Pair repulsion
         if self.pair_repulsion:
-            self.zbl_basis = ZBLBasis(p=6, trainable=self.zbl_trainable)
+            self.zbl_basis = ZBLBasis(p=self.num_polynomial_cutoff)
 
     @flax.linen.compact
     def __call__(
@@ -410,7 +421,11 @@ class MACEModel(flax.linen.Module):
                 )
 
                 radial_embeddings = jax.vmap(
-                    radial_basis(self.cutoff, self.num_radial_basis)
+                    radial_basis(
+                        r_max=self.cutoff,
+                        num_radial_basis=self.num_radial_basis,
+                        num_polynomial_cutoff=self.num_polynomial_cutoff,
+                    ),
                 )(lengths)
                 vecs = cuex.RepArray("1o", vecs)
 
